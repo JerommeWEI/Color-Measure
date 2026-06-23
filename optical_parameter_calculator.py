@@ -64,6 +64,28 @@ DEFAULT_REFLECTANCE_CSV = (
     r"\A01-需求输入\20260415-色板测试\03-分析数据"
     r"\20260417-完整分析结果\A组_反射率数据.csv"
 )
+DEFAULT_FWHM_MAP_CSV = (
+    r"E:\GIT_Space\spectral-calculation\test\tmp"
+    r"\roi_signal_confidence_check_v2.csv"
+)
+FWHM_MODEL_NONE = "忽略 FWHM"
+FWHM_MODEL_FIXED = "固定 FWHM"
+FWHM_MODEL_MAP = "面阵标定表"
+FWHM_FIELD_AVERAGE = "平均"
+FWHM_FIELD_MAX = "最大"
+FWHM_FIELD_MIN = "最小"
+FWHM_FIELD_CENTER = "中心"
+FWHM_FIELD_EDGE_AVERAGE = "边缘平均"
+FWHM_FIELD_MANUAL = "手动坐标"
+FWHM_MODELS = (FWHM_MODEL_NONE, FWHM_MODEL_FIXED, FWHM_MODEL_MAP)
+FWHM_FIELD_OPTIONS = (
+    FWHM_FIELD_AVERAGE,
+    FWHM_FIELD_MAX,
+    FWHM_FIELD_MIN,
+    FWHM_FIELD_CENTER,
+    FWHM_FIELD_EDGE_AVERAGE,
+    FWHM_FIELD_MANUAL,
+)
 
 CIE_1931_2DEG_5NM = (
     (380, 0.001368, 0.000039, 0.006450),
@@ -271,6 +293,263 @@ def make_sampling_wavelengths(start_nm, end_nm, step_nm):
     return wavelengths
 
 
+def read_fwhm_map_csv(file_path):
+    if not os.path.exists(file_path):
+        raise ValueError(f"FWHM 标定 CSV 文件不存在：{file_path}")
+
+    required_fields = {
+        "roi_id",
+        "roi_x",
+        "roi_y",
+        "roi_width",
+        "roi_height",
+        "fwhm_nm",
+    }
+    points_by_roi = {}
+    skipped_status_roi_ids = set()
+
+    with open(file_path, "r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        if not reader.fieldnames:
+            raise ValueError("FWHM 标定 CSV 文件为空。")
+
+        missing_fields = sorted(required_fields - set(reader.fieldnames))
+        if missing_fields:
+            missing_text = "、".join(missing_fields)
+            raise ValueError(f"FWHM 标定 CSV 缺少字段：{missing_text}。")
+
+        for row_index, row in enumerate(reader, 2):
+            roi_id = (row.get("roi_id") or "").strip() or f"row_{row_index}"
+            if roi_id in points_by_roi:
+                continue
+
+            metric_status = (row.get("metric_status") or "ok").strip()
+            if metric_status and metric_status != "ok":
+                skipped_status_roi_ids.add(roi_id)
+                continue
+
+            try:
+                x = float((row.get("roi_x") or "").strip())
+                y = float((row.get("roi_y") or "").strip())
+                width = float((row.get("roi_width") or "").strip())
+                height = float((row.get("roi_height") or "").strip())
+                fwhm_nm = float((row.get("fwhm_nm") or "").strip())
+            except ValueError as exc:
+                raise ValueError(f"FWHM 标定 CSV 第 {row_index} 行包含非数字字段。") from exc
+
+            values = (x, y, width, height, fwhm_nm)
+            if not all(math.isfinite(value) for value in values):
+                continue
+            if width <= 0 or height <= 0 or fwhm_nm <= 0:
+                continue
+
+            points_by_roi[roi_id] = {
+                "roi_id": roi_id,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+                "center_x": x + width / 2,
+                "center_y": y + height / 2,
+                "fwhm_nm": fwhm_nm,
+            }
+
+    points = list(points_by_roi.values())
+    if not points:
+        raise ValueError("FWHM 标定 CSV 没有 metric_status=ok 的有效 ROI。")
+
+    fwhm_values = [point["fwhm_nm"] for point in points]
+    center_x_values = [point["center_x"] for point in points]
+    center_y_values = [point["center_y"] for point in points]
+    return {
+        "points": points,
+        "count": len(points),
+        "skipped_status_count": len(skipped_status_roi_ids),
+        "fwhm_min": min(fwhm_values),
+        "fwhm_max": max(fwhm_values),
+        "fwhm_mean": sum(fwhm_values) / len(fwhm_values),
+        "center_x_min": min(center_x_values),
+        "center_x_max": max(center_x_values),
+        "center_y_min": min(center_y_values),
+        "center_y_max": max(center_y_values),
+    }
+
+
+def get_center_fwhm_point(fwhm_map):
+    target_x = (fwhm_map["center_x_min"] + fwhm_map["center_x_max"]) / 2
+    target_y = (fwhm_map["center_y_min"] + fwhm_map["center_y_max"]) / 2
+    return min(
+        fwhm_map["points"],
+        key=lambda item: math.hypot(
+            item["center_x"] - target_x, item["center_y"] - target_y
+        ),
+    )
+
+
+def select_fwhm_from_map(fwhm_map, field_mode, manual_x=None, manual_y=None):
+    points = fwhm_map["points"]
+
+    if field_mode == FWHM_FIELD_AVERAGE:
+        return {
+            "fwhm_nm": fwhm_map["fwhm_mean"],
+            "selection": f"全部 {fwhm_map['count']} 个有效 ROI 平均",
+        }
+
+    if field_mode == FWHM_FIELD_MAX:
+        point = max(points, key=lambda item: item["fwhm_nm"])
+        return {
+            "fwhm_nm": point["fwhm_nm"],
+            "selection": f"最大 FWHM ROI {point['roi_id']}",
+        }
+
+    if field_mode == FWHM_FIELD_MIN:
+        point = min(points, key=lambda item: item["fwhm_nm"])
+        return {
+            "fwhm_nm": point["fwhm_nm"],
+            "selection": f"最小 FWHM ROI {point['roi_id']}",
+        }
+
+    if field_mode == FWHM_FIELD_CENTER:
+        point = get_center_fwhm_point(fwhm_map)
+        return {
+            "fwhm_nm": point["fwhm_nm"],
+            "selection": f"中心最近 ROI {point['roi_id']}",
+        }
+
+    if field_mode == FWHM_FIELD_EDGE_AVERAGE:
+        tolerance = 1e-9
+        edge_points = [
+            point
+            for point in points
+            if (
+                abs(point["center_x"] - fwhm_map["center_x_min"]) <= tolerance
+                or abs(point["center_x"] - fwhm_map["center_x_max"]) <= tolerance
+                or abs(point["center_y"] - fwhm_map["center_y_min"]) <= tolerance
+                or abs(point["center_y"] - fwhm_map["center_y_max"]) <= tolerance
+            )
+        ]
+        if not edge_points:
+            edge_points = points
+        return {
+            "fwhm_nm": sum(point["fwhm_nm"] for point in edge_points)
+            / len(edge_points),
+            "selection": f"边缘 {len(edge_points)} 个 ROI 平均",
+        }
+
+    if field_mode == FWHM_FIELD_MANUAL:
+        if manual_x is None or manual_y is None:
+            raise ValueError("手动坐标模式需要输入 X 和 Y。")
+        point = min(
+            points,
+            key=lambda item: math.hypot(
+                item["center_x"] - manual_x, item["center_y"] - manual_y
+            ),
+        )
+        return {
+            "fwhm_nm": point["fwhm_nm"],
+            "selection": f"手动坐标最近 ROI {point['roi_id']}",
+        }
+
+    raise ValueError("视场位置必须是平均、最大、最小、中心、边缘平均或手动坐标。")
+
+
+def build_fwhm_config(
+    model,
+    fixed_fwhm_text,
+    map_csv_path,
+    field_mode,
+    manual_x_text,
+    manual_y_text,
+):
+    if model == FWHM_MODEL_NONE:
+        return {
+            "model": model,
+            "fwhm_nm": None,
+            "detail_lines": ["  FWHM 模型: 忽略 FWHM"],
+        }
+
+    if model == FWHM_MODEL_FIXED:
+        fixed_fwhm = parse_positive_float(fixed_fwhm_text.strip(), "固定 FWHM")
+        return {
+            "model": model,
+            "fwhm_nm": fixed_fwhm,
+            "detail_lines": [
+                "  FWHM 模型: 固定 FWHM",
+                f"  有效 FWHM: {fixed_fwhm:g} nm",
+            ],
+        }
+
+    if model == FWHM_MODEL_MAP:
+        map_csv_path = map_csv_path.strip()
+        if not map_csv_path:
+            raise ValueError("请选择 FWHM 标定 CSV。")
+
+        manual_x = manual_y = None
+        if field_mode == FWHM_FIELD_MANUAL:
+            manual_x = parse_float(manual_x_text.strip(), "手动 X")
+            manual_y = parse_float(manual_y_text.strip(), "手动 Y")
+
+        fwhm_map = read_fwhm_map_csv(map_csv_path)
+        selected = select_fwhm_from_map(fwhm_map, field_mode, manual_x, manual_y)
+        return {
+            "model": model,
+            "fwhm_nm": selected["fwhm_nm"],
+            "fwhm_map": fwhm_map,
+            "detail_lines": [
+                "  FWHM 模型: 面阵标定表",
+                f"  FWHM 标定 CSV: {map_csv_path}",
+                f"  有效 ROI: {fwhm_map['count']} 个",
+                f"  忽略非 ok ROI: {fwhm_map['skipped_status_count']} 个",
+                f"  FWHM 范围: {fwhm_map['fwhm_min']:.6g}-{fwhm_map['fwhm_max']:.6g} nm",
+                f"  视场选择: {field_mode}（{selected['selection']}）",
+                f"  有效 FWHM: {selected['fwhm_nm']:.6g} nm",
+            ],
+        }
+
+    raise ValueError("FWHM 模型必须是忽略、固定 FWHM 或面阵标定表。")
+
+
+def sample_channel_reflectance(
+    source_wavelengths,
+    reflectance_values,
+    center_wavelength,
+    fwhm_nm,
+):
+    if fwhm_nm is None:
+        return linear_interpolate(
+            source_wavelengths, reflectance_values, center_wavelength
+        )
+
+    sigma = fwhm_nm / (2 * math.sqrt(2 * math.log(2)))
+    radius = sigma * 3
+    start = max(source_wavelengths[0], center_wavelength - radius)
+    end = min(source_wavelengths[-1], center_wavelength + radius)
+    if start >= end:
+        return linear_interpolate(
+            source_wavelengths, reflectance_values, center_wavelength
+        )
+
+    integration_step = min(1.0, max(0.2, fwhm_nm / 12))
+    weighted_total = 0.0
+    weight_total = 0.0
+    wavelength = start
+    tolerance = integration_step * 1e-9
+    while wavelength <= end + tolerance:
+        weight = math.exp(-0.5 * ((wavelength - center_wavelength) / sigma) ** 2)
+        reflectance = linear_interpolate(
+            source_wavelengths, reflectance_values, wavelength
+        )
+        weighted_total += reflectance * weight
+        weight_total += weight
+        wavelength += integration_step
+
+    if weight_total == 0:
+        return linear_interpolate(
+            source_wavelengths, reflectance_values, center_wavelength
+        )
+    return weighted_total / weight_total
+
+
 def sampled_reflectance_to_lab(sample_wavelengths, reflectance_values, illuminant):
     x_total = 0.0
     y_total = 0.0
@@ -296,6 +575,112 @@ def sampled_reflectance_to_lab(sample_wavelengths, reflectance_values, illuminan
     return xyz_to_lab(xyz, illuminant)
 
 
+def calculate_sample_lab_for_fwhm(
+    source_wavelengths,
+    sample_curve,
+    sample_wavelengths,
+    illuminant,
+    fwhm_nm,
+):
+    reflectance = [
+        sample_channel_reflectance(
+            source_wavelengths, sample_curve, wavelength, fwhm_nm
+        )
+        for wavelength in sample_wavelengths
+    ]
+    return sampled_reflectance_to_lab(sample_wavelengths, reflectance, illuminant)
+
+
+def analyze_fwhm_field_delta_e(
+    csv_path,
+    start_nm,
+    end_nm,
+    step_nm,
+    illuminant,
+    fwhm_map,
+):
+    if illuminant not in WHITE_POINTS:
+        raise ValueError("Lab 白点必须是 D50、D65 或 A。")
+
+    reflectance_data = read_reflectance_csv(csv_path)
+    source_wavelengths = reflectance_data["wavelengths"]
+    sample_wavelengths = make_sampling_wavelengths(start_nm, end_nm, step_nm)
+    center_point = get_center_fwhm_point(fwhm_map)
+    center_fwhm = center_point["fwhm_nm"]
+
+    reference_labs = []
+    for sample_curve in reflectance_data["samples"]:
+        reference_labs.append(
+            calculate_sample_lab_for_fwhm(
+                source_wavelengths,
+                sample_curve,
+                sample_wavelengths,
+                illuminant,
+                center_fwhm,
+            )
+        )
+
+    rows = []
+    global_values = []
+    worst_roi = ""
+    worst_sample = ""
+    worst_delta_e = -1.0
+
+    for point in fwhm_map["points"]:
+        roi_values = []
+        roi_worst_sample = ""
+        roi_worst_delta_e = -1.0
+
+        for sample_name, sample_curve, reference_lab in zip(
+            reflectance_data["sample_names"],
+            reflectance_data["samples"],
+            reference_labs,
+        ):
+            lab = calculate_sample_lab_for_fwhm(
+                source_wavelengths,
+                sample_curve,
+                sample_wavelengths,
+                illuminant,
+                point["fwhm_nm"],
+            )
+            delta_e = delta_e_2000(reference_lab, lab)
+            roi_values.append(delta_e)
+            global_values.append(delta_e)
+
+            if delta_e > roi_worst_delta_e:
+                roi_worst_delta_e = delta_e
+                roi_worst_sample = sample_name
+            if delta_e > worst_delta_e:
+                worst_delta_e = delta_e
+                worst_roi = point["roi_id"]
+                worst_sample = sample_name
+
+        rows.append(
+            {
+                "roi_id": point["roi_id"],
+                "center_x": point["center_x"],
+                "center_y": point["center_y"],
+                "fwhm_nm": point["fwhm_nm"],
+                "mean": sum(roi_values) / len(roi_values),
+                "max": max(roi_values),
+                "worst_sample": roi_worst_sample,
+            }
+        )
+
+    rows.sort(key=lambda item: item["max"], reverse=True)
+    return {
+        "center_roi": center_point["roi_id"],
+        "center_fwhm": center_fwhm,
+        "roi_count": len(fwhm_map["points"]),
+        "sample_count": len(reflectance_data["sample_names"]),
+        "channel_count": len(sample_wavelengths),
+        "mean_delta_e": sum(global_values) / len(global_values),
+        "max_delta_e": max(global_values),
+        "worst_roi": worst_roi,
+        "worst_sample": worst_sample,
+    }, rows
+
+
 def analyze_reflectance_channel_drift(
     csv_path,
     start_nm,
@@ -303,6 +688,7 @@ def analyze_reflectance_channel_drift(
     step_nm,
     drift_nm,
     illuminant,
+    fwhm_nm=None,
 ):
     if illuminant not in WHITE_POINTS:
         raise ValueError("Lab 白点必须是 D50、D65 或 A。")
@@ -324,7 +710,9 @@ def analyze_reflectance_channel_drift(
             reflectance_data["sample_names"], reflectance_data["samples"]
         ):
             base_reflectance = [
-                linear_interpolate(source_wavelengths, sample_curve, wavelength)
+                sample_channel_reflectance(
+                    source_wavelengths, sample_curve, wavelength, fwhm_nm
+                )
                 for wavelength in sample_wavelengths
             ]
             base_lab = sampled_reflectance_to_lab(
@@ -337,8 +725,8 @@ def analyze_reflectance_channel_drift(
                 plus_wavelengths = list(sample_wavelengths)
                 plus_wavelengths[channel_index] = plus_wavelength
                 plus_reflectance = list(base_reflectance)
-                plus_reflectance[channel_index] = linear_interpolate(
-                    source_wavelengths, sample_curve, plus_wavelength
+                plus_reflectance[channel_index] = sample_channel_reflectance(
+                    source_wavelengths, sample_curve, plus_wavelength, fwhm_nm
                 )
                 plus_lab = sampled_reflectance_to_lab(
                     plus_wavelengths, plus_reflectance, illuminant
@@ -352,8 +740,8 @@ def analyze_reflectance_channel_drift(
                 minus_wavelengths = list(sample_wavelengths)
                 minus_wavelengths[channel_index] = minus_wavelength
                 minus_reflectance = list(base_reflectance)
-                minus_reflectance[channel_index] = linear_interpolate(
-                    source_wavelengths, sample_curve, minus_wavelength
+                minus_reflectance[channel_index] = sample_channel_reflectance(
+                    source_wavelengths, sample_curve, minus_wavelength, fwhm_nm
                 )
                 minus_lab = sampled_reflectance_to_lab(
                     minus_wavelengths, minus_reflectance, illuminant
@@ -634,7 +1022,7 @@ class RoundedButton(tk.Canvas):
 class OpticalParameterCalculator(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("光学参数计算工具 v1.0")
+        self.title("光学参数计算工具 v1.1")
         self.geometry("1000x620")
         self.minsize(900, 540)
         self.configure(bg=THEME_COLORS["background"])
@@ -668,6 +1056,7 @@ class OpticalParameterCalculator(tk.Tk):
             troughcolor=colors["fill"],
         )
         style.configure("TFrame", background=colors["background"])
+        style.configure("Card.TFrame", background=colors["card_translucent"])
         style.configure(
             "TLabel",
             font=fonts["body"],
@@ -727,6 +1116,10 @@ class OpticalParameterCalculator(tk.Tk):
         )
         style.map(
             "TNotebook.Tab",
+            padding=[
+                ("selected", [18, 9]),
+                ("!selected", [20, 10]),
+            ],
             background=[
                 ("selected", colors["primary"]),
                 ("active", colors["fill_light"]),
@@ -983,9 +1376,49 @@ class OpticalParameterCalculator(tk.Tk):
             anchor=tk.W, pady=(0, 12)
         )
 
-        self._build_colorimetry_input_panel(left_panel)
-        self._build_colorimetry_formula_panel(left_panel)
-        self._build_colorimetry_action_panel(left_panel)
+        scroll_canvas = tk.Canvas(
+            left_panel,
+            bg=THEME_COLORS["background"],
+            highlightthickness=0,
+            bd=0,
+        )
+        scroll_frame = ttk.Frame(scroll_canvas)
+        scrollbar = ttk.Scrollbar(
+            left_panel,
+            orient=tk.VERTICAL,
+            command=scroll_canvas.yview,
+            style="Vertical.TScrollbar",
+        )
+        scroll_window = scroll_canvas.create_window(
+            (0, 0), window=scroll_frame, anchor=tk.NW
+        )
+        scroll_canvas.configure(yscrollcommand=scrollbar.set)
+
+        def update_scroll_region(event):
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+
+        def update_scroll_width(event):
+            scroll_canvas.itemconfigure(scroll_window, width=event.width)
+
+        def bind_mousewheel(event):
+            scroll_canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        def unbind_mousewheel(event):
+            scroll_canvas.unbind_all("<MouseWheel>")
+
+        def on_mousewheel(event):
+            scroll_canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        scroll_frame.bind("<Configure>", update_scroll_region)
+        scroll_canvas.bind("<Configure>", update_scroll_width)
+        scroll_canvas.bind("<Enter>", bind_mousewheel)
+        scroll_canvas.bind("<Leave>", unbind_mousewheel)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._build_colorimetry_input_panel(scroll_frame)
+        self._build_colorimetry_formula_panel(scroll_frame)
+        self._build_colorimetry_action_panel(scroll_frame)
         self._build_colorimetry_output_panel(right_panel)
         self._show_colorimetry_initial_state()
 
@@ -1002,6 +1435,12 @@ class OpticalParameterCalculator(tk.Tk):
         self.sampling_step_var = tk.StringVar(value="10")
         self.wavelength_drift_var = tk.StringVar(value="1")
         self.illuminant_var = tk.StringVar(value="D50")
+        self.fwhm_model_var = tk.StringVar(value=FWHM_MODEL_NONE)
+        self.fixed_fwhm_var = tk.StringVar(value="15")
+        self.fwhm_map_csv_var = tk.StringVar(value=DEFAULT_FWHM_MAP_CSV)
+        self.fwhm_field_var = tk.StringVar(value=FWHM_FIELD_AVERAGE)
+        self.fwhm_manual_x_var = tk.StringVar(value="")
+        self.fwhm_manual_y_var = tk.StringVar(value="")
 
         ttk.Label(input_group, text="反射率 CSV", style="Card.TLabel").grid(
             row=0, column=0, sticky=tk.W, padx=(0, 8), pady=7
@@ -1042,6 +1481,77 @@ class OpticalParameterCalculator(tk.Tk):
             row=5, column=2, sticky=tk.W, pady=7
         )
 
+        ttk.Label(input_group, text="FWHM 模型", style="Card.TLabel").grid(
+            row=6, column=0, sticky=tk.W, padx=(0, 8), pady=7
+        )
+        ttk.Combobox(
+            input_group,
+            textvariable=self.fwhm_model_var,
+            values=FWHM_MODELS,
+            state="readonly",
+            width=12,
+        ).grid(row=6, column=1, sticky=tk.EW, padx=(0, 8), pady=7)
+        ttk.Label(input_group, text="高斯光谱响应", style="Card.TLabel").grid(
+            row=6, column=2, sticky=tk.W, pady=7
+        )
+
+        self._add_input_row(input_group, 7, "固定 FWHM", self.fixed_fwhm_var, "nm")
+
+        ttk.Label(input_group, text="FWHM CSV", style="Card.TLabel").grid(
+            row=8, column=0, sticky=tk.W, padx=(0, 8), pady=7
+        )
+        ttk.Entry(input_group, textvariable=self.fwhm_map_csv_var).grid(
+            row=8, column=1, sticky=tk.EW, padx=(0, 8), pady=7
+        )
+        RoundedButton(
+            input_group,
+            text="浏览",
+            command=self.browse_fwhm_map_csv,
+            bg=THEME_COLORS["button_secondary"],
+            fg=THEME_COLORS["button_secondary_text"],
+            activebackground=THEME_COLORS["fill"],
+            font=THEME_FONTS["button_small"],
+            padx=12,
+            pady=5,
+        ).grid(row=8, column=2, sticky=tk.W, pady=7)
+
+        ttk.Label(input_group, text="视场位置", style="Card.TLabel").grid(
+            row=9, column=0, sticky=tk.W, padx=(0, 8), pady=7
+        )
+        ttk.Combobox(
+            input_group,
+            textvariable=self.fwhm_field_var,
+            values=FWHM_FIELD_OPTIONS,
+            state="readonly",
+            width=12,
+        ).grid(row=9, column=1, sticky=tk.EW, padx=(0, 8), pady=7)
+        ttk.Label(input_group, text="过滤非 ok ROI", style="Card.TLabel").grid(
+            row=9, column=2, sticky=tk.W, pady=7
+        )
+
+        manual_frame = ttk.Frame(input_group, style="Card.TFrame")
+        manual_frame.grid(row=10, column=1, sticky=tk.EW, padx=(0, 8), pady=7)
+        manual_frame.columnconfigure(1, weight=1)
+        manual_frame.columnconfigure(3, weight=1)
+        ttk.Label(input_group, text="手动 X/Y", style="Card.TLabel").grid(
+            row=10, column=0, sticky=tk.W, padx=(0, 8), pady=7
+        )
+        ttk.Label(manual_frame, text="X", style="Card.TLabel").grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 4)
+        )
+        ttk.Entry(manual_frame, textvariable=self.fwhm_manual_x_var, width=8).grid(
+            row=0, column=1, sticky=tk.EW, padx=(0, 8)
+        )
+        ttk.Label(manual_frame, text="Y", style="Card.TLabel").grid(
+            row=0, column=2, sticky=tk.W, padx=(0, 4)
+        )
+        ttk.Entry(manual_frame, textvariable=self.fwhm_manual_y_var, width=8).grid(
+            row=0, column=3, sticky=tk.EW
+        )
+        ttk.Label(input_group, text="像面坐标", style="Card.TLabel").grid(
+            row=10, column=2, sticky=tk.W, pady=7
+        )
+
     def _build_colorimetry_formula_panel(self, parent):
         formula_group = ttk.LabelFrame(
             parent, text="计算基准", padding=12, style="Card.TLabelframe"
@@ -1051,6 +1561,7 @@ class OpticalParameterCalculator(tk.Tk):
         rows = [
             ("基准采样", "380-780 nm，默认 10 nm"),
             ("漂移模型", "单通道 ±漂移，其它通道不变"),
+            ("FWHM", "可选高斯响应加权反射率"),
             ("色差", "实测反射率 -> Lab -> ΔE00"),
         ]
         for row, (name, formula) in enumerate(rows):
@@ -1276,10 +1787,35 @@ class OpticalParameterCalculator(tk.Tk):
                 self.wavelength_drift_var.get().strip(), "通道漂移量"
             )
             illuminant = self.illuminant_var.get().strip()
+            fwhm_config = build_fwhm_config(
+                self.fwhm_model_var.get().strip(),
+                self.fixed_fwhm_var.get(),
+                self.fwhm_map_csv_var.get(),
+                self.fwhm_field_var.get().strip(),
+                self.fwhm_manual_x_var.get(),
+                self.fwhm_manual_y_var.get(),
+            )
 
             summary, rows = analyze_reflectance_channel_drift(
-                csv_path, start_nm, end_nm, step_nm, drift_nm, illuminant
+                csv_path,
+                start_nm,
+                end_nm,
+                step_nm,
+                drift_nm,
+                illuminant,
+                fwhm_config["fwhm_nm"],
             )
+            fwhm_field_summary = None
+            fwhm_field_rows = []
+            if fwhm_config.get("fwhm_map"):
+                fwhm_field_summary, fwhm_field_rows = analyze_fwhm_field_delta_e(
+                    csv_path,
+                    start_nm,
+                    end_nm,
+                    step_nm,
+                    illuminant,
+                    fwhm_config["fwhm_map"],
+                )
 
             details = [
                 "=" * 60,
@@ -1292,6 +1828,8 @@ class OpticalParameterCalculator(tk.Tk):
                 f"  采样间隔: {step_nm:g} nm",
                 f"  单通道漂移: ±{drift_nm:g} nm",
                 f"  Lab 白点: {illuminant}",
+            "",
+                *fwhm_config["detail_lines"],
                 "",
                 "数据概况:",
                 f"  反射率数据范围: {summary['source_range'][0]:g}-{summary['source_range'][1]:g} nm",
@@ -1305,12 +1843,36 @@ class OpticalParameterCalculator(tk.Tk):
                 f"  最差样品 = {summary['worst_sample']}",
                 "",
                 "计算基准:",
-                "  基准为标称采样通道对应的实测反射率插值值。",
+                "  忽略 FWHM 时，基准为标称采样通道对应的实测反射率插值值。",
+                "  启用 FWHM 时，每个通道使用高斯光谱响应对反射率加权采样。",
                 "  每次只漂移一个通道，其他通道保持标称波长。",
                 "  对所有样品分别计算 +漂移和 -漂移，再统计每个通道的平均和最大 ΔE00。",
                 "  当前为自包含计算：CIE 1931 2° 配色函数 + 指定白点。",
                 "  ΔE00 使用 CIEDE2000 公式计算。",
             ]
+            if fwhm_field_summary:
+                details.extend(
+                    [
+                        "",
+                        "FWHM 场偏差:",
+                        f"  基准 ROI: {fwhm_field_summary['center_roi']}，FWHM = {fwhm_field_summary['center_fwhm']:.6g} nm",
+                        f"  参与 ROI: {fwhm_field_summary['roi_count']} 个",
+                        f"  相对中心 FWHM 的平均 ΔE00 = {fwhm_field_summary['mean_delta_e']:.6g}",
+                        f"  相对中心 FWHM 的最大 ΔE00 = {fwhm_field_summary['max_delta_e']:.6g}",
+                        f"  最差 ROI = {fwhm_field_summary['worst_roi']}",
+                        f"  最差样品 = {fwhm_field_summary['worst_sample']}",
+                        "",
+                        "FWHM 场偏差 Top 5 ROI:",
+                    ]
+                )
+                for row in fwhm_field_rows[:5]:
+                    details.append(
+                        "  ROI {roi_id}: x={center_x:.0f}, y={center_y:.0f}, "
+                        "FWHM={fwhm_nm:.6g} nm, 平均 ΔE00={mean:.6g}, "
+                        "最大 ΔE00={max:.6g}, 最差样品={worst_sample}".format(
+                            **row
+                        )
+                    )
 
             self._set_channel_drift_rows(rows)
             self._set_colorimetry_detail_text("\n".join(details))
@@ -1329,6 +1891,12 @@ class OpticalParameterCalculator(tk.Tk):
         self.sampling_step_var.set("10")
         self.wavelength_drift_var.set("1")
         self.illuminant_var.set("D50")
+        self.fwhm_model_var.set(FWHM_MODEL_NONE)
+        self.fixed_fwhm_var.set("15")
+        self.fwhm_map_csv_var.set(DEFAULT_FWHM_MAP_CSV)
+        self.fwhm_field_var.set(FWHM_FIELD_AVERAGE)
+        self.fwhm_manual_x_var.set("")
+        self.fwhm_manual_y_var.set("")
         self._show_colorimetry_initial_state()
 
     def browse_reflectance_csv(self):
@@ -1338,6 +1906,14 @@ class OpticalParameterCalculator(tk.Tk):
         )
         if file_path:
             self.reflectance_csv_var.set(file_path)
+
+    def browse_fwhm_map_csv(self):
+        file_path = filedialog.askopenfilename(
+            title="选择 FWHM 标定 CSV",
+            filetypes=(("CSV 文件", "*.csv"), ("所有文件", "*.*")),
+        )
+        if file_path:
+            self.fwhm_map_csv_var.set(file_path)
 
     def _show_initial_state(self):
         self._set_result_rows([("等待计算", "请输入左侧参数", "")])
@@ -1349,7 +1925,7 @@ class OpticalParameterCalculator(tk.Tk):
             [{"wavelength": "等待计算", "mean": "请输入左侧参数", "max": "", "worst_sample": ""}]
         )
         self._set_colorimetry_detail_text(
-            "请选择反射率 CSV，设置 380-780 nm、10 nm 采样和通道漂移量后点击计算。"
+            "请选择反射率 CSV，设置采样、漂移量和可选 FWHM 模型后点击计算。"
         )
         self.colorimetry_status_var.set("等待输入参数")
 

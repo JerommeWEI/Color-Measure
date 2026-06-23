@@ -1,6 +1,6 @@
 # Color-Measure
 
-Color-Measure 是一个基于 Python `tkinter` 的光学与色度学参数计算工具。当前版本为 `v1.0`。
+Color-Measure 是一个基于 Python `tkinter` 的光学与色度学参数计算工具。当前版本为 `v1.1`。
 
 ## 运行方式
 
@@ -10,7 +10,7 @@ python optical_parameter_calculator.py
 
 也可以在 Windows 下使用 `pythonw.exe` 启动，避免额外打开控制台窗口。
 
-## v1.0 功能
+## v1.1 功能
 
 ### 物高计算
 
@@ -51,12 +51,19 @@ python optical_parameter_calculator.py
 - 采样间隔
 - 单通道漂移量
 - Lab 白点
+- FWHM 模型
+- 固定 FWHM
+- FWHM 面阵标定 CSV
+- FWHM 视场位置
 
 计算逻辑：
 
 - 以实测反射率曲线为输入
 - 按设定波段和间隔进行标称采样
 - 每次只模拟一个光谱通道发生正负漂移
+- 启用 FWHM 时，按高斯光谱响应对反射率进行加权采样
+- 导入面阵标定表时，过滤非 `ok` ROI 并按视场位置选择有效 FWHM
+- 以中心 ROI 的 FWHM 为基准，计算中心到边缘 FWHM 变化造成的 Delta E00 偏差
 - 重新计算 Lab
 - 使用 CIEDE2000 计算漂移前后的 Delta E00
 
@@ -68,6 +75,13 @@ python optical_parameter_calculator.py
 - 全局平均 Delta E00
 - 全局最大 Delta E00
 - 最敏感通道
+- FWHM 场偏差的平均 Delta E00
+- FWHM 场偏差的最大 Delta E00
+- FWHM 场偏差 Top 5 ROI
+
+### 界面
+
+- 选项卡被选中后的视觉比例调整为未选中状态的 90%。
 
 ## 计算说明
 
@@ -75,4 +89,5 @@ python optical_parameter_calculator.py
 
 ## 版本
 
+- `v1.1`: 增加色度学 FWHM 固定值与面阵标定表配置，计算中心到边缘 FWHM 场偏差；调整选中选项卡视觉比例为未选中状态的 90%。
 - `v1.0`: 初始 GUI 版本，包含物高/工作距离计算和色度学通道漂移敏感度分析。
