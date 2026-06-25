@@ -5,10 +5,21 @@ Color-Measure 是一个基于 Python `tkinter` 的光学与色度学参数计算
 ## 运行方式
 
 ```powershell
-python optical_parameter_calculator.py
+python main.py
 ```
 
-也可以在 Windows 下使用 `pythonw.exe` 启动，避免额外打开控制台窗口。
+也可以在 Windows 下使用 `pythonw.exe main.py` 启动，避免额外打开控制台窗口。
+
+## 项目结构
+
+入口文件 `main.py` 位于根目录，功能按职责拆分到 `src/` 包内：
+
+- `src/constants.py`：主题、字体、光谱范围、CIE 1931 配色函数表、白点等常量
+- `src/io_utils.py`：输入解析、反射率与 FWHM 标定 CSV 读取、插值、采样波长生成
+- `src/optics.py`：物高 / 工作距离几何光学计算
+- `src/colorimetry.py`：CIE 插值、XYZ/Lab、CIEDE2000、FWHM 高斯采样、通道漂移与场偏差分析
+- `src/widgets.py`：自绘圆角按钮等控件
+- `src/app.py`：Tk 主窗口与回调编排
 
 ## v1.1 功能
 
@@ -41,7 +52,7 @@ python optical_parameter_calculator.py
 
 ### 色度学计算
 
-用于评估光谱相机通道中心波长漂移对色度学结果的影响。
+用于评估光谱相机各通道中心波长（CWL）整体随机漂移对色度学结果的影响（蒙特卡洛模拟）。
 
 支持输入：
 
@@ -49,7 +60,9 @@ python optical_parameter_calculator.py
 - 采样起始波长
 - 采样结束波长
 - 采样间隔
-- 单通道漂移量
+- 通道漂移幅度（每通道独立均匀分布 ±D）
+- 模拟次数（蒙特卡洛场景数）
+- 随机种子（固定种子可复现）
 - Lab 白点
 - FWHM 模型
 - 固定 FWHM
@@ -58,23 +71,25 @@ python optical_parameter_calculator.py
 
 计算逻辑：
 
-- 以实测反射率曲线为输入
-- 按设定波段和间隔进行标称采样
-- 每次只模拟一个光谱通道发生正负漂移
-- 启用 FWHM 时，按高斯光谱响应对反射率进行加权采样
+- 以实测反射率曲线（完整连续色块反射光谱）为输入
+- 按设定波段和间隔生成采样通道（CWL）
+- 每个通道以带宽（FWHM）高斯光谱响应对连续反射光谱加权积分，得到通道反射率
+- 蒙特卡洛整体漂移：每次给所有通道各抽一个独立 U[-D,+D] 漂移量，整体重算 Lab，对每个样品计算相对基准的 ΔE00，重复 N 次（后台线程计算，状态栏显示进度）
+- 固定随机种子，相同输入结果完全可复现
+- FWHM 来源为「固定 FWHM」或「面阵标定表」二选一（漂移 ΔE00 不支持「忽略 FWHM」）
 - 导入面阵标定表时，过滤非 `ok` ROI 并按视场位置选择有效 FWHM
 - 以中心 ROI 的 FWHM 为基准，计算中心到边缘 FWHM 变化造成的 Delta E00 偏差
-- 重新计算 Lab
 - 使用 CIEDE2000 计算漂移前后的 Delta E00
 
 输出内容：
 
-- 每个通道的平均 Delta E00
-- 每个通道的最大 Delta E00
-- 最大影响对应的测试样品
+- 每个样品的平均 Delta E00
+- 每个样品的最大 Delta E00
+- 每个样品的 P95 Delta E00
 - 全局平均 Delta E00
 - 全局最大 Delta E00
-- 最敏感通道
+- 全局 P95 / P99 Delta E00
+- 最差样品
 - FWHM 场偏差的平均 Delta E00
 - FWHM 场偏差的最大 Delta E00
 - FWHM 场偏差 Top 5 ROI
@@ -85,7 +100,7 @@ python optical_parameter_calculator.py
 
 ## 计算说明
 
-本项目当前为轻量级单文件工具，不依赖第三方 Python 包。色度学计算内置 CIE 1931 2° 配色函数表和 CIEDE2000 计算公式。
+本项目仅使用 Python 标准库，不依赖第三方包。色度学计算内置 CIE 1931 2° 配色函数表和 CIEDE2000 计算公式。
 
 ## 版本
 
