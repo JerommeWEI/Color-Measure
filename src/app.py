@@ -51,9 +51,9 @@ _COLORIMETRY_VAR_ATTRS = (
 class OpticalParameterCalculator(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("光学参数计算工具 v1.3")
-        self.geometry("1000x620")
-        self.minsize(900, 540)
+        self.title("光学参数计算工具 v1.4")
+        self.geometry("1300x806")
+        self.minsize(1170, 702)
         self.configure(bg=THEME_COLORS["background"])
 
         self._setup_style()
@@ -141,7 +141,7 @@ class OpticalParameterCalculator(tk.Tk):
         style.configure(
             "TNotebook.Tab",
             font=fonts["tab"],
-            padding=[20, 10],
+            padding=[20, 7],
             background=colors["fill"],
             foreground=colors["text_secondary"],
             borderwidth=0,
@@ -149,8 +149,8 @@ class OpticalParameterCalculator(tk.Tk):
         style.map(
             "TNotebook.Tab",
             padding=[
-                ("selected", [18, 9]),
-                ("!selected", [20, 10]),
+                ("selected", [18, 6]),
+                ("!selected", [20, 7]),
             ],
             background=[
                 ("selected", colors["primary"]),
@@ -458,18 +458,29 @@ class OpticalParameterCalculator(tk.Tk):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        self._colorimetry_config_expanded = True
+        self._colorimetry_config_header = ttk.Label(
+            scroll_frame, text="▼ 配置参数", style="Title.TLabel", cursor="hand2"
+        )
+        self._colorimetry_config_header.pack(anchor=tk.W, pady=(0, 6))
+        self._colorimetry_config_header.bind(
+            "<Button-1>", lambda _event: self._toggle_colorimetry_config()
+        )
         self._build_colorimetry_input_panel(scroll_frame)
-        self._build_colorimetry_formula_panel(scroll_frame)
-        self._build_colorimetry_action_panel(scroll_frame)
+
+        self._build_colorimetry_action_panel(right_panel)
         self._build_colorimetry_output_panel(right_panel)
+        self._build_colorimetry_formula_panel(right_panel)
+        self._build_colorimetry_detail_text(right_panel)
         self._show_colorimetry_initial_state()
 
     def _build_colorimetry_input_panel(self, parent):
         input_group = ttk.LabelFrame(
-            parent, text="配置参数", padding=12, style="Card.TLabelframe"
+            parent, text="", padding=12, style="Card.TLabelframe"
         )
-        input_group.pack(fill=tk.X)
+        input_group.pack(fill=tk.X, pady=(0, 12))
         input_group.columnconfigure(1, weight=1)
+        self._colorimetry_config_body = input_group
 
         self.reflectance_csv_var = tk.StringVar(value=DEFAULT_REFLECTANCE_CSV)
         self.sampling_start_var = tk.StringVar(value="380")
@@ -689,6 +700,7 @@ class OpticalParameterCalculator(tk.Tk):
         scrollbar.grid(row=0, column=1, sticky=tk.NS)
         self.colorimetry_result_table.configure(yscrollcommand=scrollbar.set)
 
+    def _build_colorimetry_detail_text(self, parent):
         detail_group = ttk.LabelFrame(
             parent, text="计算过程", padding=10, style="Card.TLabelframe"
         )
@@ -708,6 +720,15 @@ class OpticalParameterCalculator(tk.Tk):
             relief=tk.FLAT,
         )
         self.colorimetry_detail_text.pack(fill=tk.BOTH, expand=True)
+
+    def _toggle_colorimetry_config(self):
+        self._colorimetry_config_expanded = not self._colorimetry_config_expanded
+        if self._colorimetry_config_expanded:
+            self._colorimetry_config_header.configure(text="▼ 配置参数")
+            self._colorimetry_config_body.pack(fill=tk.X, pady=(0, 12))
+        else:
+            self._colorimetry_config_header.configure(text="▶ 配置参数")
+            self._colorimetry_config_body.pack_forget()
 
     def calculate_working_distance(self):
         try:

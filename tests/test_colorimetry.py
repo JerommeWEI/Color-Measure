@@ -2,6 +2,7 @@
 """colorimetry 色度学核心测试：CIEDE2000 官方算例、Lab、CIE 插值、
 FWHM 采样、蒙特卡洛可复现。"""
 
+import numpy as np
 import pytest
 
 from src.colorimetry import (
@@ -10,6 +11,7 @@ from src.colorimetry import (
     interpolate_cie_1931_2deg,
     sample_channel_reflectance,
     _percentile,
+    _delta_e_2000_vectorized,
     analyze_reflectance_mc_drift,
     build_fwhm_config,
 )
@@ -42,6 +44,28 @@ def test_delta_e_2000_symmetric_and_zero():
     b = (52.0, -1.0, 4.0)
     assert delta_e_2000(a, b) == pytest.approx(delta_e_2000(b, a))
     assert delta_e_2000(a, a) == 0.0
+
+
+def test_delta_e_2000_vectorized_matches_scalar():
+    # 随机 500 对 Lab（覆盖各象限），向量化结果必须与标量逐元素一致
+    rng = np.random.default_rng(123)
+    n = 500
+    lab1 = np.stack(
+        [rng.uniform(0, 100, n), rng.uniform(-128, 128, n), rng.uniform(-128, 128, n)],
+        axis=1,
+    )
+    lab2 = np.stack(
+        [rng.uniform(0, 100, n), rng.uniform(-128, 128, n), rng.uniform(-128, 128, n)],
+        axis=1,
+    )
+    # 注入边界：a=b=0 触发 c'=0 的 hue 分支
+    lab1[:5, 1] = 0.0
+    lab1[:5, 2] = 0.0
+    lab2[:5, 1] = 0.0
+    lab2[:5, 2] = 0.0
+    vec = _delta_e_2000_vectorized(lab1, lab2)
+    scalar = np.array([delta_e_2000(lab1[i], lab2[i]) for i in range(n)])
+    assert np.allclose(vec, scalar, rtol=1e-9, atol=1e-12)
 
 
 def test_xyz_to_lab_white_point_is_pure_white():

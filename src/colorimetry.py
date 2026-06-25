@@ -3,7 +3,8 @@
 FWHM 高斯采样与面阵选择、蒙特卡洛整体 CWL 漂移 ΔE00 分析与 FWHM 场偏差分析。"""
 
 import math
-import random
+
+import numpy as np
 
 from .constants import (
     WHITE_POINTS,
@@ -359,6 +360,144 @@ def _percentile(values, p):
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (rank - lower)
 
 
+def _interpolate_cie_vectorized(wavelengths):
+    """对 CIE 1931 2° 5nm 表做向量化线性插值。
+
+    wavelengths: [n] nm 数组（380-780）。返回 [n, 3] 的 (x̄, ȳ, z̄)，
+    与标量 interpolate_cie_1931_2deg 数值一致。
+    """
+    cie = np.asarray(CIE_1931_2DEG_5NM, dtype=float)
+    cie_wl = cie[:, 0]
+    cie_xyz = cie[:, 1:]
+    idx = np.searchsorted(cie_wl, wavelengths)
+    idx_lo = np.clip(idx - 1, 0, len(cie_wl) - 2)
+    idx_hi = np.clip(idx_lo + 1, 0, len(cie_wl) - 1)
+    wl_lo = cie_wl[idx_lo]
+    wl_hi = cie_wl[idx_hi]
+    span = np.where(wl_hi == wl_lo, 1.0, wl_hi - wl_lo)
+    ratio = (wavelengths - wl_lo) / span
+    return cie_xyz[idx_lo] + (cie_xyz[idx_hi] - cie_xyz[idx_lo]) * ratio[:, None]
+
+
+def _xyz_to_lab_vectorized(xyz, white):
+    """xyz: [N, 3]，white: [3]。返回 [N, 3] Lab，与标量 xyz_to_lab 对齐。"""
+    delta = 6 / 29
+    threshold = delta ** 3
+
+    def f(value):
+        return np.where(
+            value > threshold,
+            np.cbrt(np.maximum(value, 0.0)),
+            value / (3 * delta ** 2) + 4 / 29,
+        )
+
+    ratios = xyz / white[None, :]
+    fx, fy, fz = f(ratios[:, 0]), f(ratios[:, 1]), f(ratios[:, 2])
+    return np.stack([116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)], axis=1)
+
+
+def _delta_e_2000_vectorized(lab1, lab2):
+    """lab1, lab2: [N, 3]。返回 [N] ΔE00，与标量 delta_e_2000 逐分支对齐。"""
+    l1, a1, b1 = lab1[:, 0], lab1[:, 1], lab1[:, 2]
+    l2, a2, b2 = lab2[:, 0], lab2[:, 1], lab2[:, 2]
+
+    c1 = np.hypot(a1, b1)
+    c2 = np.hypot(a2, b2)
+    c_bar = (c1 + c2) / 2
+    c_bar_7 = c_bar ** 7
+    g = 0.5 * (1 - np.sqrt(c_bar_7 / (c_bar_7 + 25 ** 7)))
+
+    a1p = (1 + g) * a1
+    a2p = (1 + g) * a2
+    c1p = np.hypot(a1p, b1)
+    c2p = np.hypot(a2p, b2)
+
+    h1p = np.degrees(np.arctan2(b1, a1p)) % 360
+    h2p = np.degrees(np.arctan2(b2, a2p)) % 360
+    h1p = np.where(c1p == 0, 0.0, h1p)
+    h2p = np.where(c2p == 0, 0.0, h2p)
+
+    delta_l = l2 - l1
+    delta_c = c2p - c1p
+
+    dh_raw = h2p - h1p
+    dh = np.where(
+        dh_raw > 180, dh_raw - 360, np.where(dh_raw < -180, dh_raw + 360, dh_raw)
+    )
+    delta_h_prime = np.where(c1p * c2p == 0, 0.0, dh)
+    delta_h = 2 * np.sqrt(c1p * c2p) * np.sin(np.radians(delta_h_prime / 2))
+
+    l_bar = (l1 + l2) / 2
+    c_bar_p = (c1p + c2p) / 2
+
+    cond_zero = c1p * c2p == 0
+    cond_far = np.abs(h1p - h2p) > 180
+    cond_far_lt = cond_far & (h1p + h2p < 360)
+    cond_far_ge = cond_far & (h1p + h2p >= 360)
+    h_bar_prime = np.where(
+        cond_zero, h1p + h2p,
+        np.where(
+            cond_far_lt, (h1p + h2p + 360) / 2,
+            np.where(cond_far_ge, (h1p + h2p - 360) / 2, (h1p + h2p) / 2),
+        ),
+    )
+
+    t = (
+        1
+        - 0.17 * np.cos(np.radians(h_bar_prime - 30))
+        + 0.24 * np.cos(np.radians(2 * h_bar_prime))
+        + 0.32 * np.cos(np.radians(3 * h_bar_prime + 6))
+        - 0.20 * np.cos(np.radians(4 * h_bar_prime - 63))
+    )
+    delta_theta = 30 * np.exp(-((h_bar_prime - 275) / 25) ** 2)
+    c_bar_p_7 = c_bar_p ** 7
+    r_c = 2 * np.sqrt(c_bar_p_7 / (c_bar_p_7 + 25 ** 7))
+    s_l = 1 + (0.015 * (l_bar - 50) ** 2) / np.sqrt(20 + (l_bar - 50) ** 2)
+    s_c = 1 + 0.045 * c_bar_p
+    s_h = 1 + 0.015 * c_bar_p * t
+    r_t = -np.sin(np.radians(2 * delta_theta)) * r_c
+
+    l_term = delta_l / s_l
+    c_term = delta_c / s_c
+    h_term = delta_h / s_h
+    return np.sqrt(l_term ** 2 + c_term ** 2 + h_term ** 2 + r_t * c_term * h_term)
+
+
+def _drifted_labs(source_wl_np, curves_np, centers, fwhm_nm, white):
+    """给定通道中心波长，批量计算每条样品曲线的 Lab。
+
+    centers 为 [n_channels]（返回 [n_curves, 3]）或 [m, n_channels]
+    （返回 [m, n_curves, 3]）。每个通道以带宽(FWHM)高斯响应对完整反射光谱
+    加权积分，再用 CIE 配色函数积分成 XYZ 并转 Lab。
+    """
+    sigma = fwhm_nm / (2 * math.sqrt(2 * math.log(2)))
+    radius = sigma * 3
+
+    if centers.ndim == 1:
+        diff = source_wl_np[None, :] - centers[:, None]
+        weight = np.exp(-0.5 * (diff / sigma) ** 2) * (np.abs(diff) <= radius)
+        row_sum = weight.sum(axis=1, keepdims=True)
+        weight = weight / np.where(row_sum == 0, 1.0, row_sum)
+        refl = curves_np @ weight.T
+        cie = _interpolate_cie_vectorized(centers)
+        xyz = refl @ cie
+        white_totals = cie.sum(axis=0)
+        xyz_norm = xyz / white_totals[None, :] * white[None, :]
+        return _xyz_to_lab_vectorized(xyz_norm, white)
+
+    m, n_channels = centers.shape
+    diff = source_wl_np[None, None, :] - centers[:, :, None]
+    weight = np.exp(-0.5 * (diff / sigma) ** 2) * (np.abs(diff) <= radius)
+    row_sum = weight.sum(axis=2, keepdims=True)
+    weight = weight / np.where(row_sum == 0, 1.0, row_sum)
+    refl = np.einsum("is,mcs->mic", curves_np, weight)
+    cie = _interpolate_cie_vectorized(centers.reshape(-1)).reshape(m, n_channels, 3)
+    xyz = np.einsum("mic,mck->mik", refl, cie)
+    white_totals = cie.sum(axis=1)
+    xyz_norm = xyz / white_totals[:, None, :] * white[None, None, :]
+    return _xyz_to_lab_vectorized(xyz_norm.reshape(-1, 3), white).reshape(m, -1, 3)
+
+
 def analyze_reflectance_mc_drift(
     csv_path,
     start_nm,
@@ -371,12 +510,12 @@ def analyze_reflectance_mc_drift(
     seed=0,
     progress_callback=None,
 ):
-    """蒙特卡洛整体 CWL 漂移敏感度分析。
+    """蒙特卡洛整体 CWL 漂移敏感度分析（numpy 向量化）。
 
     每次随机给所有采样通道各抽一个独立 U[-drift_nm, +drift_nm] 漂移量，整体重算
     Lab 并对每个样品计算相对基准的 ΔE00；重复 n_samples 次。progress_callback
     (done, total) 可选，用于进度反馈。返回 (summary, sample_rows)，sample_rows
-    按最大 ΔE00 降序。
+    按最大 ΔE00 降序。固定随机种子，相同输入结果完全可复现。
     """
     if illuminant not in WHITE_POINTS:
         raise ValueError("Lab 白点必须是 D50、D65 或 A。")
@@ -388,54 +527,80 @@ def analyze_reflectance_mc_drift(
     reflectance_data = read_reflectance_csv(csv_path)
     source_wavelengths = reflectance_data["wavelengths"]
     sample_wavelengths = make_sampling_wavelengths(start_nm, end_nm, step_nm)
-    n_channels = len(sample_wavelengths)
     sample_names = reflectance_data["sample_names"]
     sample_curves = reflectance_data["samples"]
+    n_channels = len(sample_wavelengths)
+    n_curves = len(sample_curves)
 
-    base_labs = []
-    for curve in sample_curves:
-        base_reflectance = [
-            sample_channel_reflectance(source_wavelengths, curve, wavelength, fwhm_nm)
-            for wavelength in sample_wavelengths
+    source_wl_np = np.asarray(source_wavelengths, dtype=float)
+    curves_np = np.asarray(sample_curves, dtype=float)
+    sample_wl_np = np.asarray(sample_wavelengths, dtype=float)
+    white = np.asarray(WHITE_POINTS[illuminant], dtype=float)
+
+    base_lab = _drifted_labs(source_wl_np, curves_np, sample_wl_np, fwhm_nm, white)
+
+    def _zero_result():
+        rows = [
+            {"sample": name, "mean": 0.0, "max": 0.0, "p95": 0.0}
+            for name in sample_names
         ]
-        base_labs.append(
-            sampled_reflectance_to_lab(sample_wavelengths, base_reflectance, illuminant)
-        )
+        summary = {
+            "file_path": csv_path,
+            "sample_count": n_curves,
+            "channel_count": n_channels,
+            "n_samples": n_samples,
+            "seed": seed,
+            "source_range": (source_wavelengths[0], source_wavelengths[-1]),
+            "mean_delta_e": 0.0,
+            "max_delta_e": 0.0,
+            "p95_delta_e": 0.0,
+            "p99_delta_e": 0.0,
+            "worst_sample": rows[0]["sample"] if rows else "",
+        }
+        return summary, rows
 
-    rng = random.Random(seed)
-    per_sample_deltas = [[] for _ in sample_names]
+    # drift=0：漂移后等于基准，ΔE00 恒为 0（满足零漂移测试 abs 1e-9）
+    if drift_nm == 0:
+        if progress_callback:
+            progress_callback(n_samples, n_samples)
+        return _zero_result()
+
+    rng = np.random.default_rng(seed)
+    drift = rng.uniform(-drift_nm, drift_nm, size=(n_samples, n_channels))
+    centers_drifted = np.clip(
+        sample_wl_np[None, :] + drift, SPECTRAL_MIN_NM, SPECTRAL_MAX_NM
+    )
+
+    chunk = 64
+    per_sample_deltas = [[] for _ in range(n_curves)]
     all_deltas = []
     progress_step = max(1, n_samples // 100)
 
-    for iteration in range(n_samples):
-        drifted_wavelengths = [
-            min(SPECTRAL_MAX_NM, max(SPECTRAL_MIN_NM,
-                wavelength + rng.uniform(-drift_nm, drift_nm)))
-            for wavelength in sample_wavelengths
-        ]
-        for curve, base_lab, bucket in zip(
-            sample_curves, base_labs, per_sample_deltas
-        ):
-            drifted_reflectance = [
-                sample_channel_reflectance(source_wavelengths, curve, dwl, fwhm_nm)
-                for dwl in drifted_wavelengths
-            ]
-            drifted_lab = sampled_reflectance_to_lab(
-                drifted_wavelengths, drifted_reflectance, illuminant
-            )
-            delta_e = delta_e_2000(base_lab, drifted_lab)
-            bucket.append(delta_e)
-            all_deltas.append(delta_e)
+    for t0 in range(0, n_samples, chunk):
+        t1 = min(n_samples, t0 + chunk)
+        lab_blk = _drifted_labs(
+            source_wl_np, curves_np, centers_drifted[t0:t1], fwhm_nm, white
+        )
+        m = t1 - t0
+        base_rep = np.broadcast_to(base_lab[None, :, :], (m, n_curves, 3))
+        de_blk = _delta_e_2000_vectorized(
+            base_rep.reshape(-1, 3), lab_blk.reshape(-1, 3)
+        ).reshape(m, n_curves)
 
-        if progress_callback and (iteration + 1) % progress_step == 0:
-            progress_callback(iteration + 1, n_samples)
+        all_deltas.append(de_blk.reshape(-1))
+        for i in range(n_curves):
+            per_sample_deltas[i].extend(de_blk[:, i].tolist())
 
+        if progress_callback and (t1 % progress_step == 0 or t1 == n_samples):
+            progress_callback(t1, n_samples)
+
+    delta_list = np.concatenate(all_deltas).tolist()
     sample_rows = [
         {
             "sample": name,
-            "mean": _mean(bucket),
-            "max": max(bucket),
-            "p95": _percentile(bucket, 0.95),
+            "mean": float(_mean(bucket)),
+            "max": float(max(bucket)),
+            "p95": float(_percentile(bucket, 0.95)),
         }
         for name, bucket in zip(sample_names, per_sample_deltas)
     ]
@@ -443,15 +608,15 @@ def analyze_reflectance_mc_drift(
 
     summary = {
         "file_path": csv_path,
-        "sample_count": len(sample_names),
+        "sample_count": n_curves,
         "channel_count": n_channels,
         "n_samples": n_samples,
         "seed": seed,
         "source_range": (source_wavelengths[0], source_wavelengths[-1]),
-        "mean_delta_e": _mean(all_deltas),
-        "max_delta_e": max(all_deltas),
-        "p95_delta_e": _percentile(all_deltas, 0.95),
-        "p99_delta_e": _percentile(all_deltas, 0.99),
+        "mean_delta_e": float(_mean(delta_list)),
+        "max_delta_e": float(max(delta_list)),
+        "p95_delta_e": float(_percentile(delta_list, 0.95)),
+        "p99_delta_e": float(_percentile(delta_list, 0.99)),
         "worst_sample": sample_rows[0]["sample"] if sample_rows else "",
     }
     return summary, sample_rows
