@@ -54,15 +54,9 @@ THEME_FONTS = {
 
 SPECTRAL_MIN_NM = 380
 SPECTRAL_MAX_NM = 780
-DEFAULT_REFLECTANCE_CSV = (
-    r"E:\OneDrive - UnispectralCN\01_研发\00_应用场景\15-LED检测"
-    r"\A01-需求输入\20260415-色板测试\03-分析数据"
-    r"\20260417-完整分析结果\A组_反射率数据.csv"
-)
-DEFAULT_FWHM_MAP_CSV = (
-    r"E:\GIT_Space\spectral-calculation\test\tmp"
-    r"\roi_signal_confidence_check_v2.csv"
-)
+# 默认留空以保证可移植性：不写死本机绝对路径；用户选择后由 settings.json 记住。
+DEFAULT_REFLECTANCE_CSV = ""
+DEFAULT_FWHM_MAP_CSV = ""
 FWHM_MODEL_NONE = "忽略 FWHM"
 FWHM_MODEL_FIXED = "固定 FWHM"
 FWHM_MODEL_MAP = "面阵标定表"
