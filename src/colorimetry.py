@@ -565,7 +565,7 @@ def analyze_reflectance_mc_drift(
             progress_callback(n_samples, n_samples)
         return _zero_result()
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(int(seed))
     drift = rng.uniform(-drift_nm, drift_nm, size=(n_samples, n_channels))
     centers_drifted = np.clip(
         sample_wl_np[None, :] + drift, SPECTRAL_MIN_NM, SPECTRAL_MAX_NM

@@ -155,6 +155,16 @@ def test_mc_drift_zero_drift_gives_zero_delta(tmp_path):
     assert summary["max_delta_e"] == pytest.approx(0.0, abs=1e-9)
 
 
+def test_mc_drift_accepts_float_seed(tmp_path):
+    # app 层种子来自 parse_float，是 float（如默认 0.0）；不得因 float seed 崩溃
+    path = _write_reflectance(tmp_path, "wl,s1\n380,0.2\n500,0.5\n700,0.8\n")
+    summary, _rows = analyze_reflectance_mc_drift(
+        path, 380.0, 700.0, 100.0, 1.0, "D65", 15.0, 10, seed=0.0
+    )
+    assert summary["n_samples"] == 10
+    assert summary["mean_delta_e"] >= 0.0
+
+
 def test_build_fwhm_config_models(tmp_path):
     none_cfg = build_fwhm_config(FWHM_MODEL_NONE, "15", "", "平均", "", "")
     assert none_cfg["fwhm_nm"] is None
