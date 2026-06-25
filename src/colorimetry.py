@@ -8,6 +8,7 @@ import numpy as np
 
 from .constants import (
     WHITE_POINTS,
+    ILLUMINANT_SPD,
     CIE_1931_2DEG_5NM,
     SPECTRAL_MIN_NM,
     SPECTRAL_MAX_NM,
@@ -210,29 +211,42 @@ def sample_channel_reflectance(
     return weighted_total / weight_total
 
 
+def _xyz_to_lab_from_white(xyz, white_xyz):
+    """由样品 XYZ 与参考白 XYZ（同光源积分得到）直接转 Lab，不查 WHITE_POINTS。"""
+    x, y, z = xyz
+    wx, wy, wz = white_xyz
+
+    def f(value):
+        delta = 6 / 29
+        if value > delta ** 3:
+            return value ** (1 / 3)
+        return value / (3 * delta ** 2) + 4 / 29
+
+    fx, fy, fz = f(x / wx), f(y / wy), f(z / wz)
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
 def sampled_reflectance_to_lab(sample_wavelengths, reflectance_values, illuminant):
-    x_total = 0.0
-    y_total = 0.0
-    z_total = 0.0
-    white_x_total = 0.0
-    white_y_total = 0.0
-    white_z_total = 0.0
+    spd_table = ILLUMINANT_SPD[illuminant]
+    spd_wl = [row[0] for row in spd_table]
+    spd_val = [row[1] for row in spd_table]
+
+    x_total = y_total = z_total = 0.0
+    white_x = white_y = white_z = 0.0
     for wavelength, reflectance in zip(sample_wavelengths, reflectance_values):
         x_bar, y_bar, z_bar = interpolate_cie_1931_2deg(wavelength)
-        x_total += reflectance * x_bar
-        y_total += reflectance * y_bar
-        z_total += reflectance * z_bar
-        white_x_total += x_bar
-        white_y_total += y_bar
-        white_z_total += z_bar
+        spd = linear_interpolate(spd_wl, spd_val, wavelength)
+        x_total += reflectance * spd * x_bar
+        y_total += reflectance * spd * y_bar
+        z_total += reflectance * spd * z_bar
+        # 参考白：完全漫反射体（反射率≡1）在该光源下的 XYZ
+        white_x += spd * x_bar
+        white_y += spd * y_bar
+        white_z += spd * z_bar
 
-    white_x, white_y, white_z = WHITE_POINTS[illuminant]
-    xyz = (
-        x_total / white_x_total * white_x,
-        y_total / white_y_total * white_y,
-        z_total / white_z_total * white_z,
+    return _xyz_to_lab_from_white(
+        (x_total, y_total, z_total), (white_x, white_y, white_z)
     )
-    return xyz_to_lab(xyz, illuminant)
 
 
 def calculate_sample_lab_for_fwhm(
@@ -259,7 +273,7 @@ def analyze_fwhm_field_delta_e(
     illuminant,
     fwhm_map,
 ):
-    if illuminant not in WHITE_POINTS:
+    if illuminant not in ILLUMINANT_SPD:
         raise ValueError("Lab 白点必须是 D50、D65 或 A。")
 
     reflectance_data = read_reflectance_csv(csv_path)
@@ -379,8 +393,23 @@ def _interpolate_cie_vectorized(wavelengths):
     return cie_xyz[idx_lo] + (cie_xyz[idx_hi] - cie_xyz[idx_lo]) * ratio[:, None]
 
 
-def _xyz_to_lab_vectorized(xyz, white):
-    """xyz: [N, 3]，white: [3]。返回 [N, 3] Lab，与标量 xyz_to_lab 对齐。"""
+def _interpolate_spd_vectorized(wavelengths, illuminant):
+    """对指定光源的 SPD（5nm 表）做向量化线性插值，返回 [n, 1]。"""
+    spd = np.asarray(ILLUMINANT_SPD[illuminant], dtype=float)
+    spd_wl = spd[:, 0]
+    spd_val = spd[:, 1]
+    idx = np.searchsorted(spd_wl, wavelengths)
+    idx_lo = np.clip(idx - 1, 0, len(spd_wl) - 2)
+    idx_hi = np.clip(idx_lo + 1, 0, len(spd_wl) - 1)
+    wl_lo = spd_wl[idx_lo]
+    wl_hi = spd_wl[idx_hi]
+    span = np.where(wl_hi == wl_lo, 1.0, wl_hi - wl_lo)
+    ratio = (wavelengths - wl_lo) / span
+    return (spd_val[idx_lo] + (spd_val[idx_hi] - spd_val[idx_lo]) * ratio)[:, None]
+
+
+def _ratios_to_lab(ratios):
+    """由 X/Xn、Y/Yn、Z/Zn 比值数组（[..., 3]）转 Lab，返回同形状。"""
     delta = 6 / 29
     threshold = delta ** 3
 
@@ -391,9 +420,13 @@ def _xyz_to_lab_vectorized(xyz, white):
             value / (3 * delta ** 2) + 4 / 29,
         )
 
-    ratios = xyz / white[None, :]
-    fx, fy, fz = f(ratios[:, 0]), f(ratios[:, 1]), f(ratios[:, 2])
-    return np.stack([116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)], axis=1)
+    fx, fy, fz = f(ratios[..., 0]), f(ratios[..., 1]), f(ratios[..., 2])
+    return np.stack([116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)], axis=-1)
+
+
+def _xyz_to_lab_vectorized(xyz, white):
+    """xyz: [N, 3]，white: [3]。返回 [N, 3] Lab，与标量 xyz_to_lab 对齐。"""
+    return _ratios_to_lab(xyz / white[None, :])
 
 
 def _delta_e_2000_vectorized(lab1, lab2):
@@ -463,12 +496,12 @@ def _delta_e_2000_vectorized(lab1, lab2):
     return np.sqrt(l_term ** 2 + c_term ** 2 + h_term ** 2 + r_t * c_term * h_term)
 
 
-def _drifted_labs(source_wl_np, curves_np, centers, fwhm_nm, white):
-    """给定通道中心波长，批量计算每条样品曲线的 Lab。
+def _drifted_labs(source_wl_np, curves_np, centers, fwhm_nm, illuminant):
+    """给定通道中心波长，批量计算每条样品曲线在指定光源下的 Lab。
 
     centers 为 [n_channels]（返回 [n_curves, 3]）或 [m, n_channels]
     （返回 [m, n_curves, 3]）。每个通道以带宽(FWHM)高斯响应对完整反射光谱
-    加权积分，再用 CIE 配色函数积分成 XYZ 并转 Lab。
+    加权积分，再乘光源 SPD 与 CIE 配色函数积分成 XYZ，以完全漫反射体为参考白转 Lab。
     """
     sigma = fwhm_nm / (2 * math.sqrt(2 * math.log(2)))
     radius = sigma * 3
@@ -479,11 +512,10 @@ def _drifted_labs(source_wl_np, curves_np, centers, fwhm_nm, white):
         row_sum = weight.sum(axis=1, keepdims=True)
         weight = weight / np.where(row_sum == 0, 1.0, row_sum)
         refl = curves_np @ weight.T
-        cie = _interpolate_cie_vectorized(centers)
-        xyz = refl @ cie
-        white_totals = cie.sum(axis=0)
-        xyz_norm = xyz / white_totals[None, :] * white[None, :]
-        return _xyz_to_lab_vectorized(xyz_norm, white)
+        weighted_cie = _interpolate_cie_vectorized(centers) * _interpolate_spd_vectorized(centers, illuminant)
+        xyz = refl @ weighted_cie
+        white_totals = weighted_cie.sum(axis=0)
+        return _xyz_to_lab_vectorized(xyz, white_totals)
 
     m, n_channels = centers.shape
     diff = source_wl_np[None, None, :] - centers[:, :, None]
@@ -492,10 +524,12 @@ def _drifted_labs(source_wl_np, curves_np, centers, fwhm_nm, white):
     weight = weight / np.where(row_sum == 0, 1.0, row_sum)
     refl = np.einsum("is,mcs->mic", curves_np, weight)
     cie = _interpolate_cie_vectorized(centers.reshape(-1)).reshape(m, n_channels, 3)
-    xyz = np.einsum("mic,mck->mik", refl, cie)
-    white_totals = cie.sum(axis=1)
-    xyz_norm = xyz / white_totals[:, None, :] * white[None, None, :]
-    return _xyz_to_lab_vectorized(xyz_norm.reshape(-1, 3), white).reshape(m, -1, 3)
+    spd = _interpolate_spd_vectorized(centers.reshape(-1), illuminant).reshape(m, n_channels, 1)
+    weighted_cie = cie * spd
+    xyz = np.einsum("mic,mck->mik", refl, weighted_cie)
+    white_totals = weighted_cie.sum(axis=1)
+    ratios = xyz / white_totals[:, None, :]
+    return _ratios_to_lab(ratios)
 
 
 def analyze_reflectance_mc_drift(
@@ -517,7 +551,7 @@ def analyze_reflectance_mc_drift(
     (done, total) 可选，用于进度反馈。返回 (summary, sample_rows)，sample_rows
     按最大 ΔE00 降序。固定随机种子，相同输入结果完全可复现。
     """
-    if illuminant not in WHITE_POINTS:
+    if illuminant not in ILLUMINANT_SPD:
         raise ValueError("Lab 白点必须是 D50、D65 或 A。")
     if fwhm_nm is None:
         raise ValueError("蒙特卡洛漂移分析需要 FWHM（带宽响应）。")
@@ -535,9 +569,8 @@ def analyze_reflectance_mc_drift(
     source_wl_np = np.asarray(source_wavelengths, dtype=float)
     curves_np = np.asarray(sample_curves, dtype=float)
     sample_wl_np = np.asarray(sample_wavelengths, dtype=float)
-    white = np.asarray(WHITE_POINTS[illuminant], dtype=float)
 
-    base_lab = _drifted_labs(source_wl_np, curves_np, sample_wl_np, fwhm_nm, white)
+    base_lab = _drifted_labs(source_wl_np, curves_np, sample_wl_np, fwhm_nm, illuminant)
 
     def _zero_result():
         rows = [
@@ -579,7 +612,7 @@ def analyze_reflectance_mc_drift(
     for t0 in range(0, n_samples, chunk):
         t1 = min(n_samples, t0 + chunk)
         lab_blk = _drifted_labs(
-            source_wl_np, curves_np, centers_drifted[t0:t1], fwhm_nm, white
+            source_wl_np, curves_np, centers_drifted[t0:t1], fwhm_nm, illuminant
         )
         m = t1 - t0
         base_rep = np.broadcast_to(base_lab[None, :, :], (m, n_curves, 3))

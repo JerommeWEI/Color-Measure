@@ -10,6 +10,7 @@ from src.colorimetry import (
     xyz_to_lab,
     interpolate_cie_1931_2deg,
     sample_channel_reflectance,
+    sampled_reflectance_to_lab,
     _percentile,
     _delta_e_2000_vectorized,
     analyze_reflectance_mc_drift,
@@ -17,6 +18,8 @@ from src.colorimetry import (
 )
 from src.constants import (
     WHITE_POINTS,
+    ILLUMINANT_SPD,
+    CIE_1931_2DEG_5NM,
     FWHM_MODEL_NONE,
     FWHM_MODEL_FIXED,
     FWHM_MODEL_MAP,
@@ -183,3 +186,44 @@ def test_build_fwhm_config_models(tmp_path):
         FWHM_MODEL_MAP, "15", str(map_path), "最大", "", ""
     )
     assert map_cfg["fwhm_nm"] == 20.0
+
+
+def test_illuminant_affects_lab():
+    # v1.7 修复：同反射率在不同光源下的 Lab 必须不同（修复前三光源完全相同）
+    wavelengths = [float(x) for x in range(380, 781, 10)]
+    reflectance = [
+        0.10, 0.12, 0.15, 0.20, 0.28, 0.38, 0.50, 0.62, 0.72, 0.78,
+        0.80, 0.78, 0.72, 0.62, 0.50, 0.40, 0.32, 0.28, 0.26, 0.28,
+        0.32, 0.38, 0.45, 0.50, 0.52, 0.50, 0.45, 0.38, 0.32, 0.28,
+        0.26, 0.25, 0.26, 0.28, 0.30, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37,
+    ]
+    lab_d50 = sampled_reflectance_to_lab(wavelengths, reflectance, "D50")
+    lab_d65 = sampled_reflectance_to_lab(wavelengths, reflectance, "D65")
+    lab_a = sampled_reflectance_to_lab(wavelengths, reflectance, "A")
+    assert delta_e_2000(lab_d50, lab_d65) > 0.1
+    assert delta_e_2000(lab_d50, lab_a) > 0.1
+    assert delta_e_2000(lab_d65, lab_a) > 0.1
+
+
+def test_spd_matches_white_points():
+    # SPD × CIE 配色函数（Y 归一化到 100）应与 WHITE_POINTS 一致
+    cie = np.asarray(CIE_1931_2DEG_5NM, dtype=float)
+    for illuminant, expected in WHITE_POINTS.items():
+        spd = np.asarray(ILLUMINANT_SPD[illuminant], dtype=float)[:, 1]
+        x_total = (spd * cie[:, 1]).sum()
+        y_total = (spd * cie[:, 2]).sum()
+        z_total = (spd * cie[:, 3]).sum()
+        calc = np.array([x_total * 100 / y_total, 100.0, z_total * 100 / y_total])
+        assert calc == pytest.approx(np.array(expected), rel=2e-3)
+
+
+def test_perfect_reflector_is_white():
+    # 完全漫反射体（反射率≡1）在每个光源下应为白：L=100, a=0, b=0
+    wavelengths = [float(x) for x in range(380, 781, 10)]
+    for illuminant in ("D50", "D65", "A"):
+        light, a, b = sampled_reflectance_to_lab(
+            wavelengths, [1.0] * len(wavelengths), illuminant
+        )
+        assert light == pytest.approx(100.0)
+        assert a == pytest.approx(0.0, abs=1e-9)
+        assert b == pytest.approx(0.0, abs=1e-9)
