@@ -51,9 +51,9 @@ _COLORIMETRY_VAR_ATTRS = (
 class OpticalParameterCalculator(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("光学参数计算工具 v1.5")
-        self.geometry("1300x806")
-        self.minsize(1170, 702)
+        self.title("光学参数计算工具 v1.6")
+        self.geometry("1300x1048")
+        self.minsize(1170, 913)
         self.configure(bg=THEME_COLORS["background"])
 
         self._setup_style()
@@ -705,6 +705,8 @@ class OpticalParameterCalculator(tk.Tk):
             parent, text="计算过程", padding=10, style="Card.TLabelframe"
         )
         detail_group.pack(fill=tk.BOTH, expand=True, pady=(14, 0))
+        detail_group.rowconfigure(0, weight=1)
+        detail_group.columnconfigure(0, weight=1)
 
         self.colorimetry_detail_text = tk.Text(
             detail_group,
@@ -719,7 +721,15 @@ class OpticalParameterCalculator(tk.Tk):
             insertbackground=THEME_COLORS["primary_light"],
             relief=tk.FLAT,
         )
-        self.colorimetry_detail_text.pack(fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(
+            detail_group,
+            orient=tk.VERTICAL,
+            command=self.colorimetry_detail_text.yview,
+            style="Vertical.TScrollbar",
+        )
+        self.colorimetry_detail_text.configure(yscrollcommand=scrollbar.set)
+        self.colorimetry_detail_text.grid(row=0, column=0, sticky=tk.NSEW)
+        scrollbar.grid(row=0, column=1, sticky=tk.NS)
 
     def _toggle_colorimetry_config(self):
         self._colorimetry_config_expanded = not self._colorimetry_config_expanded
