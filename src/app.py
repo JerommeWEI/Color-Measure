@@ -51,7 +51,7 @@ _COLORIMETRY_VAR_ATTRS = (
 class OpticalParameterCalculator(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("光学参数计算工具 v1.2")
+        self.title("光学参数计算工具 v1.3")
         self.geometry("1000x620")
         self.minsize(900, 540)
         self.configure(bg=THEME_COLORS["background"])

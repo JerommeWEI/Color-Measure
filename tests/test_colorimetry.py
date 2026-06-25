@@ -87,6 +87,15 @@ def test_sample_channel_reflectance_with_fwhm_near_center():
     assert 4.5 < value < 5.5
 
 
+def test_sample_channel_reflectance_fwhm_at_data_boundary():
+    # 回归：FWHM 积分步进末点的浮点累积不得超出数据上界
+    # （曾导致 linear_interpolate 抛 "超出反射率数据范围"）
+    xs = [380.0, 400.0]
+    ys = [0.0, 10.0]
+    value = sample_channel_reflectance(xs, ys, 390.0, 8.0)
+    assert 4.0 < value < 6.0
+
+
 def test_percentile_known_values():
     values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     assert _percentile(values, 0.0) == 1

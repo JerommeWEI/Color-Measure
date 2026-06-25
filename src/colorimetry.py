@@ -191,8 +191,12 @@ def sample_channel_reflectance(
     tolerance = integration_step * 1e-9
     while wavelength <= end + tolerance:
         weight = math.exp(-0.5 * ((wavelength - center_wavelength) / sigma) ** 2)
+        # 步进浮点累积可能使 wavelength 略超 end（=数据上界），clamp 到数据范围
+        sample_wavelength = max(
+            source_wavelengths[0], min(source_wavelengths[-1], wavelength)
+        )
         reflectance = linear_interpolate(
-            source_wavelengths, reflectance_values, wavelength
+            source_wavelengths, reflectance_values, sample_wavelength
         )
         weighted_total += reflectance * weight
         weight_total += weight
